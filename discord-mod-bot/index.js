@@ -1,221 +1,198 @@
-'use strict';
+// ============================================================
+// بوت ديسكورد شامل للحماية - ملف واحد فقط - Node.js + discord.js v14
+// - يحذف الشتائم/الروابط المشبوهة/السبام تلقائياً
+// - يكتم المخالف ساعة كاملة (Timeout)
+// - يعمل في كل قنوات السيرفر بدون استثناء أي رتبة
+// - لا قاعدة بيانات دائمة - تتبع مؤقت في الذاكرة (حد أقصى 3 أيام)
+// - التوكن من متغير البيئة DISCORD_TOKEN
+// ============================================================
 
-require('dotenv').config();
-const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  EmbedBuilder,
-  PermissionsBitField,
-  SlashCommandBuilder,
-  REST,
-  Routes,
-} = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 
-const { scanMessage, addWord, removeWord } = require('./utils/filter');
-const db = require('./utils/db');
-const config = require('./config.json');
+// ------------------------------------------------------------
+// إعدادات عامة
+// ------------------------------------------------------------
+const TIMEOUT_DURATION_MS = 60 * 60 * 1000;        // ساعة كاملة
+const TRACKING_EXPIRY_MS = 3 * 24 * 60 * 60 * 1000; // 3 أيام (حد أقصى للتتبع في الذاكرة)
+const SPAM_WINDOW_MS = 5000;                        // نافذة فحص السبام: 5 ثواني
+const SPAM_MAX_MESSAGES = 5;                        // أكثر من 5 رسائل خلال النافذة = سبام
+const SPAM_REPEAT_LIMIT = 3;                        // تكرار نفس الرسالة 3 مرات = سبام
 
+// ------------------------------------------------------------
+// قائمة الكلمات الممنوعة (عدّل/أضف حسب حاجتك)
+// ------------------------------------------------------------
+const BANNED_WORDS = [
+  'كسمك',
+  'كسامك',
+  'ابن الكلب',
+  'خول',
+  'شرموط',
+  'قحبة',
+  'كلب',
+  'حمار',
+  'fuck',
+  'shit',
+  'bitch',
+  'asshole',
+];
+
+// ------------------------------------------------------------
+// أنماط الروابط المشبوهة
+// ------------------------------------------------------------
+const SUSPICIOUS_LINK_PATTERNS = [
+  /discord(app)?\.(com|gg)\/invite\/\S+/i,
+  /discord\.gg\/\S+/i,
+  /\bfree.?nitro\b/i,
+  /steamcommunity\S*\.(ru|xyz|top|click|site)/i,
+  /\b(bit\.ly|tinyurl\.com|is\.gd|t\.co|shorturl\.at|cutt\.ly|rebrand\.ly)\/\S+/i,
+  /https?:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/i, // روابط بصيغة IP مباشرة
+  /https?:\/\/[^\s]*\.(zip|exe|scr|bat)(\?|$)/i,     // روابط تنتهي بملفات تنفيذية
+];
+
+// ------------------------------------------------------------
+// تطبيع النص لكشف التحايل بالحروف/الرموز/التكرار
+// ------------------------------------------------------------
+function normalize(text) {
+  let t = text.toLowerCase();
+  t = t.replace(/[\u064B-\u0652\u0670\u0640]/g, '');
+  t = t
+    .replace(/[إأآا]/g, 'ا')
+    .replace(/[ى]/g, 'ي')
+    .replace(/[ة]/g, 'ه')
+    .replace(/[ؤ]/g, 'و')
+    .replace(/[ئ]/g, 'ي');
+
+  const leet = { '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 'ح', '@': 'a', '$': 's', '!': 'i' };
+  t = t.replace(/[013457@$!]/g, (c) => leet[c] || c);
+
+  t = t.replace(/[^ء-يa-z\s]/g, '');
+
+  const noSpaces = t.replace(/\s+/g, '');
+  const collapsedWithSpaces = t.replace(/(.)\1+/g, '$1');
+  const collapsedNoSpaces = noSpaces.replace(/(.)\1+/g, '$1');
+
+  return [t, noSpaces, collapsedWithSpaces, collapsedNoSpaces];
+}
+
+function containsBannedWord(content) {
+  const variants = normalize(content);
+  return BANNED_WORDS.some((word) => {
+    const normWord = normalize(word)[3];
+    return variants.some((v) => v.includes(normWord));
+  });
+}
+
+function containsSuspiciousLink(content) {
+  return SUSPICIOUS_LINK_PATTERNS.some((pattern) => pattern.test(content));
+}
+
+// ------------------------------------------------------------
+// تتبع السبام في الذاكرة (بدون قاعدة بيانات)
+// خريطة: userId -> { timestamps: [...], lastContent, repeatCount, updatedAt }
+// ------------------------------------------------------------
+const spamTracker = new Map();
+
+function checkSpam(userId, content) {
+  const now = Date.now();
+  let entry = spamTracker.get(userId);
+
+  if (!entry) {
+    entry = { timestamps: [], lastContent: content, repeatCount: 1, updatedAt: now };
+    spamTracker.set(userId, entry);
+  }
+
+  entry.timestamps = entry.timestamps.filter((t) => now - t < SPAM_WINDOW_MS);
+  entry.timestamps.push(now);
+
+  if (entry.lastContent === content) {
+    entry.repeatCount += 1;
+  } else {
+    entry.lastContent = content;
+    entry.repeatCount = 1;
+  }
+  entry.updatedAt = now;
+
+  const isFlood = entry.timestamps.length > SPAM_MAX_MESSAGES;
+  const isRepeat = entry.repeatCount >= SPAM_REPEAT_LIMIT;
+
+  return isFlood || isRepeat;
+}
+
+// تنظيف دوري للبيانات القديمة (أكثر من 3 أيام) لمنع تضخم الذاكرة
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, entry] of spamTracker.entries()) {
+    if (now - entry.updatedAt > TRACKING_EXPIRY_MS) {
+      spamTracker.delete(userId);
+    }
+  }
+}, 60 * 60 * 1000); // كل ساعة
+
+// ------------------------------------------------------------
+// إعداد البوت
+// ------------------------------------------------------------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildModeration,
   ],
-  partials: [Partials.Message, Partials.Channel],
-});
-
-const SEVERITY_LABEL_AR = {
-  low: 'بسيطة 🟡',
-  medium: 'متوسطة 🟠',
-  high: 'عالية 🔴',
-  critical: 'خطيرة جداً ⛔',
-};
-
-// ------------------------- أدوات مساعدة -------------------------
-
-function isImmune(member) {
-  if (!member) return false;
-  if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
-  return member.roles.cache.some((r) => config.ignoredRoles.includes(r.name));
-}
-
-function isIgnoredChannel(channel) {
-  return config.ignoredChannels.includes(channel.id) || config.ignoredChannels.includes(channel.name);
-}
-
-async function getOrCreateLogChannel(guild) {
-  let channel = guild.channels.cache.find((c) => c.name === config.logChannelName);
-  return channel || null;
-}
-
-async function logViolation(guild, member, message, report) {
-  const logChannel = await getOrCreateLogChannel(guild);
-  if (!logChannel) return;
-
-  const embed = new EmbedBuilder()
-    .setColor(report.highestSeverity === 'critical' ? 0xff0000 : 0xffa500)
-    .setTitle('🚨 تم رصد مخالفة')
-    .addFields(
-      { name: 'العضو', value: `${member} (${member.user.tag})`, inline: true },
-      { name: 'القناة', value: `${message.channel}`, inline: true },
-      { name: 'مستوى الخطورة', value: SEVERITY_LABEL_AR[report.highestSeverity] || 'غير محدد', inline: true },
-      {
-        name: 'الكلمات المكتشفة',
-        value: report.matches.map((m) => `\`${m.word}\` (${m.category} / ${m.mode})`).join('\n').slice(0, 1024) || '-',
-      },
-      { name: 'نص الرسالة الأصلي', value: message.content.slice(0, 1000) || '-' },
-    )
-    .setTimestamp();
-
-  await logChannel.send({ embeds: [embed] }).catch(() => {});
-}
-
-async function applyPunishment(member, severityAction, warningCount) {
-  // 1) عقوبة حسب خطورة الكلمة نفسها
-  if (severityAction?.action === 'timeout') {
-    const ms = severityAction.durationMinutes * 60 * 1000;
-    await member.timeout(ms, 'مخالفة قواعد السيرفر - محتوى مسيء').catch(() => {});
-  }
-
-  // 2) عقوبة تصاعدية حسب عدد الإنذارات المتراكمة
-  const thresholdAction = config.warningThresholds[String(warningCount)];
-  if (thresholdAction) {
-    if (thresholdAction.action === 'timeout') {
-      const ms = thresholdAction.durationMinutes * 60 * 1000;
-      await member.timeout(ms, `تجاوز ${warningCount} إنذارات`).catch(() => {});
-    } else if (thresholdAction.action === 'kick') {
-      await member.kick('تجاوز الحد المسموح من الإنذارات').catch(() => {});
-    } else if (thresholdAction.action === 'ban') {
-      await member.ban({ reason: 'تجاوز الحد الأقصى من الإنذارات' }).catch(() => {});
-    }
-    return thresholdAction;
-  }
-  return null;
-}
-
-// ------------------------- معالجة الرسائل -------------------------
-
-client.on('messageCreate', async (message) => {
-  try {
-    if (message.author.bot || !message.guild) return;
-    if (isIgnoredChannel(message.channel)) return;
-
-    const member = message.member;
-    if (isImmune(member)) return;
-
-    const report = scanMessage(message.content);
-    if (!report.flagged) return;
-
-    // حذف الرسالة المخالفة
-    if (config.deleteViolatingMessages) {
-      await message.delete().catch(() => {});
-    }
-
-    // تسجيل الإنذار
-    const warningCount = db.addWarning(
-      message.guild.id,
-      message.author.id,
-      report.matches.map((m) => m.word).join(', '),
-    );
-
-    // تطبيق العقوبة
-    const severityAction = config.punishments[report.highestSeverity];
-    const escalated = await applyPunishment(member, severityAction, warningCount);
-
-    // تنبيه العضو في الروم (رسالة تختفي تلقائياً)
-    const warnMsg = await message.channel
-      .send({
-        content: `⚠️ ${message.author}، تم رصد محتوى مخالف لقوانين السيرفر وحذف رسالتك. هذا الإنذار رقم **${warningCount}**.${
-          escalated ? ` تم اتخاذ إجراء إضافي: **${escalated.action}**.` : ''
-        }`,
-      })
-      .catch(() => null);
-    if (warnMsg) setTimeout(() => warnMsg.delete().catch(() => {}), 8000);
-
-    // تسجيل في روم اللوقز
-    await logViolation(message.guild, member, message, report);
-  } catch (err) {
-    console.error('خطأ أثناء معالجة رسالة:', err);
-  }
-});
-
-// ------------------------- الأوامر (Slash Commands) -------------------------
-
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  const { commandName } = interaction;
-
-  if (commandName === 'warnings') {
-    const target = interaction.options.getUser('user') || interaction.user;
-    const warnings = db.getWarnings(interaction.guild.id, target.id);
-    const embed = new EmbedBuilder()
-      .setTitle(`إنذارات ${target.username}`)
-      .setColor(0xffa500)
-      .setDescription(
-        warnings.length
-          ? warnings.map((w, i) => `**${i + 1}.** ${w.reason} — <t:${Math.floor(new Date(w.date).getTime() / 1000)}:R>`).join('\n')
-          : 'لا يوجد أي إنذارات ✅',
-      );
-    await interaction.reply({ embeds: [embed], ephemeral: true });
-  }
-
-  if (commandName === 'clear-warnings') {
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.ModerateMembers)) {
-      return interaction.reply({ content: '❌ ما عندك صلاحية لهذا الأمر.', ephemeral: true });
-    }
-    const target = interaction.options.getUser('user');
-    db.clearWarnings(interaction.guild.id, target.id);
-    await interaction.reply({ content: `✅ تم مسح جميع إنذارات ${target.username}.`, ephemeral: true });
-  }
-
-  if (commandName === 'addword') {
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
-      return interaction.reply({ content: '❌ ما عندك صلاحية لهذا الأمر.', ephemeral: true });
-    }
-    const word = interaction.options.getString('word');
-    const category = interaction.options.getString('category') || 'insults';
-    const severity = interaction.options.getString('severity') || 'medium';
-    const added = addWord(word, category, severity);
-    await interaction.reply({
-      content: added ? `✅ تمت إضافة الكلمة إلى القائمة.` : `⚠️ الكلمة موجودة مسبقاً.`,
-      ephemeral: true,
-    });
-  }
-
-  if (commandName === 'removeword') {
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
-      return interaction.reply({ content: '❌ ما عندك صلاحية لهذا الأمر.', ephemeral: true });
-    }
-    const word = interaction.options.getString('word');
-    const removed = removeWord(word);
-    await interaction.reply({
-      content: removed ? `✅ تم حذف الكلمة من القائمة.` : `⚠️ الكلمة غير موجودة.`,
-      ephemeral: true,
-    });
-  }
-
-  if (commandName === 'testfilter') {
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
-      return interaction.reply({ content: '❌ ما عندك صلاحية لهذا الأمر.', ephemeral: true });
-    }
-    const text = interaction.options.getString('text');
-    const report = scanMessage(text);
-    await interaction.reply({
-      content: report.flagged
-        ? `🚨 **مخالف!**\nالخطورة: ${SEVERITY_LABEL_AR[report.highestSeverity]}\nالمطابقات:\n${report.matches
-            .map((m) => `- \`${m.word}\` (${m.mode})`)
-            .join('\n')}`
-        : '✅ لا يوجد أي مخالفات في هذا النص.',
-      ephemeral: true,
-    });
-  }
 });
 
 client.once('ready', () => {
-  console.log(`✅ البوت جاهز ويعمل باسم: ${client.user.tag}`);
+  console.log(`✅ البوت يعمل الآن: ${client.user.tag}`);
 });
 
-client.login(process.env.DISCORD_TOKEN);
+async function punish(message, reason) {
+  await message.delete().catch(() => {});
+
+  const warning = new EmbedBuilder()
+    .setColor(0xff0000)
+    .setDescription(`⚠️ ${message.author} — ${reason}\nتم كتمك لمدة **ساعة كاملة**.`);
+
+  const sent = await message.channel.send({ embeds: [warning] }).catch(() => {});
+  if (sent) setTimeout(() => sent.delete().catch(() => {}), 8000);
+
+  const member = message.member;
+  if (member && member.moderatable) {
+    await member.timeout(TIMEOUT_DURATION_MS, reason).catch(() => {});
+  }
+}
+
+client.on('messageCreate', async (message) => {
+  try {
+    if (message.author.bot) return;
+    if (!message.guild) return;
+    if (!message.content) return;
+
+    // النظام يطبّق على الجميع بلا استثناء أي رتبة (بما فيها الإدارة)
+
+    if (containsBannedWord(message.content)) {
+      await punish(message, 'استخدام ألفاظ مسيئة.');
+      return;
+    }
+
+    if (containsSuspiciousLink(message.content)) {
+      await punish(message, 'إرسال رابط مشبوه.');
+      return;
+    }
+
+    if (checkSpam(message.author.id, message.content)) {
+      await punish(message, 'إرسال سبام/تكرار رسائل.');
+      return;
+    }
+  } catch (err) {
+    console.error('خطأ أثناء معالجة الرسالة:', err);
+  }
+});
+
+// ------------------------------------------------------------
+// تسجيل الدخول
+// ------------------------------------------------------------
+const token = process.env.DISCORD_TOKEN;
+if (!token) {
+  console.error('❌ لم يتم العثور على DISCORD_TOKEN في متغيرات البيئة.');
+  process.exit(1);
+}
+
+client.login(token);
