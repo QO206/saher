@@ -1,0 +1,48 @@
+{
+  "profanity": {
+    "severity": "medium",
+    "words": [
+      "كسمك", "كسختك", "منيك", "منيوك", "شرموط", "شرموطة", "قحبة", "عاهرة",
+      "خول", "خرا", "زبي", "طيزك", "طيز", "نيك", "ينيك", "لعنة", "تفو",
+      "fuck", "fucking", "fucker", "shit", "bitch", "bastard", "asshole",
+      "motherfucker", "dick", "pussy", "slut", "whore"
+    ]
+  },
+  "insults": {
+    "severity": "low",
+    "words": [
+      "غبي", "احمق", "أحمق", "حمار", "كلب", "خنزير", "تافه", "قذر", "وسخ",
+      "حقير", "زبالة", "فاشل", "معاق", "مختل", "مجنون", "أهبل", "اهبل",
+      "idiot", "stupid", "dumb", "loser", "moron", "trash", "garbage",
+      "retard", "retarded", "ugly", "worthless"
+    ]
+  },
+  "bullying": {
+    "severity": "medium",
+    "words": [
+      "روح مووت", "روح انتحر", "ما احد يحبك", "مالك قيمة", "مرفوض", "منبوذ",
+      "kill yourself", "kys", "nobody likes you", "you are worthless"
+    ]
+  },
+  "racism": {
+    "severity": "high",
+    "words": [
+      "عبد", "عبيد", "زنجي", "يا اسود", "يا عبد", "كافر قذر", "طائفي",
+      "nigger", "nigga", "chink", "spic", "towelhead", "sandnigger"
+    ]
+  },
+  "sexual_harassment": {
+    "severity": "high",
+    "words": [
+      "ارسلي صور", "ابغى صورك", "تعالي ننام", "ابيك تتعري", "سكسي جدا ابيك",
+      "send nudes", "nude pics", "sex chat"
+    ]
+  },
+  "severe_hate": {
+    "severity": "critical",
+    "words": [
+      "يلعن دينك", "يلعن اهلك", "الله يلعنك", "ابن الحرام", "ابن الزنا",
+      "terrorist scum", "subhuman"
+    ]
+  }
+}

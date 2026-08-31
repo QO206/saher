@@ -1,0 +1,19 @@
+{
+  "prefix": "!",
+  "logChannelName": "mod-logs",
+  "deleteViolatingMessages": true,
+  "punishments": {
+    "low": { "action": "warn" },
+    "medium": { "action": "warn" },
+    "high": { "action": "timeout", "durationMinutes": 10 },
+    "critical": { "action": "timeout", "durationMinutes": 60 }
+  },
+  "warningThresholds": {
+    "3": { "action": "timeout", "durationMinutes": 15 },
+    "5": { "action": "timeout", "durationMinutes": 120 },
+    "7": { "action": "kick" },
+    "10": { "action": "ban" }
+  },
+  "ignoredRoles": ["Admin", "Moderator", "مشرف", "ادمن"],
+  "ignoredChannels": []
+}
